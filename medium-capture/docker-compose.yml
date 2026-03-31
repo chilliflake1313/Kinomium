@@ -1,0 +1,13 @@
+services:
+  archivebox:
+    image: archivebox/archivebox:latest
+    container_name: archivebox
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./archive-data:/data
+    environment:
+      - PUBLIC_INDEX=True
+      - PUBLIC_SNAPSHOTS=True
+      - SEARCH_BACKEND_ENGINE=sonic
+    command: server --quick-init 0.0.0.0:8000

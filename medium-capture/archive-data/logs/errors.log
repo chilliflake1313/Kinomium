@@ -1,0 +1,11 @@
+
+> /usr/local/bin/archivebox server --quick-init 0.0.0.0:8000; TS=2026-03-31__18:57:56 VERSION=0.7.3 IN_DOCKER=True IS_TTY=False
+
+> /usr/local/bin/archivebox server --quick-init 0.0.0.0:8000; TS=2026-03-31__18:57:56 VERSION=0.7.3 IN_DOCKER=True IS_TTY=False
+
+> /usr/local/bin/archivebox server --quick-init 0.0.0.0:8000; TS=2026-03-31__18:57:58 VERSION=0.7.3 IN_DOCKER=True IS_TTY=False
+
+> /usr/local/bin/archivebox add --depth=0 https://medium.com/bugbountywriteup/%EF%B8%8F-sql-injection-for-beginners-the-complete-guide-2750907b095b; TS=2026-03-31__19:01:58 VERSION=0.7.3 IN_DOCKER=True IS_TTY=True
+
+Exception in archive_methods.save_htmltotext(Link(url=https://medium.com/bugbountywriteup/%EF%B8%8F-sql-injection-for-beginners-the-complete-guide-2750907b095b)) command=/usr/local/bin/archivebox add --depth=0 https://medium.com/bugbountywriteup/%EF%B8%8F-sql-injection-for-beginners-the-complete-guide-2750907b095b; ts=2026-03-31__19:03:41
+cannot access local variable 'cmd' where it is not associated with a value
