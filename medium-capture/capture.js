@@ -19,11 +19,11 @@ const VIEWPORTS = [
 ];
 
 const WORKER_STRATEGIES = [
-  { name: 'Pre-DOM-Commit', waitUntil: 'commit', delayMs: 0, earlyStop: true, blockAssets: true, timeout: 8000, jsEnabled: true },
-  { name: 'Ultra-Early-50ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: true, timeout: 10000, jsEnabled: true },
-  { name: 'Ultra-Early-150ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: false, timeout: 12000, jsEnabled: true },
-  { name: 'NoJS-Early', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: false, blockAssets: false, timeout: 15000, jsEnabled: false },
-  { name: 'NetworkIdle-800ms', waitUntil: 'networkidle', delayMs: 800, earlyStop: false, blockAssets: false, timeout: 30000, jsEnabled: true },
+  { name: 'Pre-DOM-Commit', waitUntil: 'commit', snapshots: [0], earlyStop: true, blockAssets: true, timeout: 8000, jsEnabled: true },
+  { name: 'Ultra-Early-Multi', waitUntil: 'domcontentloaded', snapshots: [0, 50, 150], earlyStop: true, blockAssets: true, timeout: 10000, jsEnabled: true },
+  { name: 'DOM-Progressive', waitUntil: 'domcontentloaded', snapshots: [0, 300, 800], earlyStop: false, blockAssets: false, timeout: 15000, jsEnabled: true },
+  { name: 'NoJS-Early', waitUntil: 'domcontentloaded', snapshots: [0], earlyStop: false, blockAssets: false, timeout: 15000, jsEnabled: false },
+  { name: 'NetworkIdle-Complete', waitUntil: 'networkidle', snapshots: [0, 500], earlyStop: false, blockAssets: false, timeout: 30000, jsEnabled: true },
 ];
 
 let memoryUsage = { contexts: 0, pages: 0 };
@@ -64,8 +64,8 @@ function getRandomViewport() {
   return VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
 }
 
-function blockTracking(page, blockAssets = false) {
-  return page.route('**/*', (route) => {
+async function blockNonEssential(page, blockAssets = false) {
+  await page.route('**/*', (route) => {
     const url = route.request().url();
     const resourceType = route.request().resourceType();
 
@@ -73,6 +73,7 @@ function blockTracking(page, blockAssets = false) {
       url.includes('analytics') ||
       url.includes('doubleclick') ||
       url.includes('google-analytics') ||
+      url.includes('googletagmanager') ||
       url.includes('facebook.com/tr') ||
       url.includes('facebook.com/plugins') ||
       url.includes('tracking') ||
@@ -85,7 +86,11 @@ function blockTracking(page, blockAssets = false) {
       url.includes('chartbeat') ||
       url.includes('newrelic') ||
       url.includes('quantserve') ||
-      url.includes('scorecardresearch');
+      url.includes('scorecardresearch') ||
+      url.includes('taboola') ||
+      url.includes('outbrain') ||
+      url.includes('ad-delivery') ||
+      url.includes('advertising');
 
     if (shouldBlock) {
       return route.abort('blockedbyclient');
@@ -101,9 +106,9 @@ function blockTracking(page, blockAssets = false) {
   });
 }
 
-async function performEarlyCleanup(page) {
+async function removeNonEssentialDOM(page) {
   await page.evaluate(() => {
-    const overlaySelectors = [
+    const selectors = [
       '[role="dialog"][style*="position: fixed"]',
       '[role="dialog"][style*="z-index"]',
       '.modal[style*="z-index"]',
@@ -118,9 +123,11 @@ async function performEarlyCleanup(page) {
       '[class*="membership"][style*="z-index"]',
       'iframe[src*="doubleclick"]',
       'iframe[src*="facebook"]',
+      'iframe[src*="twitter"]',
+      'iframe[src*="instagram"]',
     ];
 
-    overlaySelectors.forEach((selector) => {
+    selectors.forEach((selector) => {
       try {
         document.querySelectorAll(selector).forEach((el) => {
           const style = window.getComputedStyle(el);
@@ -143,7 +150,19 @@ async function performEarlyCleanup(page) {
     document.querySelectorAll('script[src*="doubleclick"]').forEach((el) => el.remove());
     document.querySelectorAll('script[src*="facebook"]').forEach((el) => el.remove());
     document.querySelectorAll('script[src*="tracking"]').forEach((el) => el.remove());
+    document.querySelectorAll('script[src*="ads"]').forEach((el) => el.remove());
   });
+}
+
+async function captureSnapshot(page) {
+  await removeNonEssentialDOM(page);
+
+  const html = await page.evaluate(() => {
+    document.querySelectorAll('script, noscript').forEach((el) => el.remove());
+    return document.documentElement.outerHTML;
+  });
+
+  return html;
 }
 
 export async function captureSingle(url, strategy, browser = null, abortController = null) {
@@ -151,14 +170,8 @@ export async function captureSingle(url, strategy, browser = null, abortControll
   let context;
   const ownBrowser = !browser;
 
-  if (abortController && abortController.signal.aborted) {
-    return {
-      worker: strategy.name,
-      html: '',
-      score: 0,
-      success: false,
-      aborted: true,
-    };
+  if (abortController?.signal.aborted) {
+    return [];
   }
 
   if (ownBrowser) {
@@ -166,23 +179,17 @@ export async function captureSingle(url, strategy, browser = null, abortControll
   }
 
   try {
-    context = await browser.newContext();
+    context = await browser.newContext({
+      userAgent: getRandomUserAgent(),
+      viewport: getRandomViewport(),
+      javaScriptEnabled: strategy.jsEnabled,
+    });
     memoryUsage.contexts++;
 
     page = await context.newPage();
     memoryUsage.pages++;
 
-    await page.setViewportSize(getRandomViewport());
-    await page.setExtraHTTPHeaders({
-      'User-Agent': getRandomUserAgent(),
-      'Accept-Language': 'en-US,en;q=0.9',
-    });
-
-    if (!strategy.jsEnabled) {
-      await context.setJavaScriptEnabled(false);
-    }
-
-    await page.setDefaultTimeout(strategy.timeout);
+    page.setDefaultTimeout(strategy.timeout);
 
     const abortListener = () => {
       if (page && !page.isClosed()) {
@@ -194,77 +201,59 @@ export async function captureSingle(url, strategy, browser = null, abortControll
       abortController.signal.addEventListener('abort', abortListener);
     }
 
-    await blockTracking(page, strategy.blockAssets);
+    await blockNonEssential(page, strategy.blockAssets);
 
-    if (strategy.earlyStop && strategy.delayMs === 0) {
-      await page.goto(url, {
-        waitUntil: strategy.waitUntil,
-        timeout: strategy.timeout,
-      });
-
-      if (strategy.jsEnabled) {
-        await page.evaluate(() => window.stop());
-      }
-
-      await performEarlyCleanup(page);
-    } else {
-      await page.goto(url, {
-        waitUntil: strategy.waitUntil,
-        timeout: strategy.timeout,
-      });
-
-      if (strategy.earlyStop && strategy.jsEnabled) {
-        await page.evaluate(() => window.stop());
-      }
-
-      await performEarlyCleanup(page);
-
-      if (strategy.delayMs > 0) {
-        await page.waitForTimeout(strategy.delayMs);
-      }
-    }
-
-    if (abortController && abortController.signal.aborted) {
-      return {
-        worker: strategy.name,
-        html: '',
-        score: 0,
-        success: false,
-        aborted: true,
-      };
-    }
-
-    const html = await page.evaluate(() => {
-      document.querySelectorAll('script, noscript').forEach((el) => el.remove());
-      return document.documentElement.outerHTML;
+    await page.goto(url, {
+      waitUntil: strategy.waitUntil,
+      timeout: strategy.timeout,
     });
 
-    const score = scoreHtml(html);
-    const structuralMetrics = analyzeStructure(html);
-    const dominanceMetrics = analyzeContentDominance(html);
+    if (strategy.earlyStop && strategy.jsEnabled) {
+      await page.evaluate(() => window.stop());
+    }
+
+    const snapshots = [];
+
+    for (const delayMs of strategy.snapshots) {
+      if (abortController?.signal.aborted) break;
+
+      if (delayMs > 0) {
+        await page.waitForTimeout(delayMs);
+      }
+
+      const html = await captureSnapshot(page);
+      const score = scoreHtml(html);
+      const metrics = analyzeStructure(html);
+      const dominance = analyzeContentDominance(html);
+
+      snapshots.push({
+        worker: `${strategy.name}-${delayMs}ms`,
+        html,
+        score,
+        success: true,
+        jsEnabled: strategy.jsEnabled,
+        delayMs,
+        textLength: html.replace(/<[^>]*>/g, '').length,
+        ...metrics,
+        ...dominance,
+      });
+    }
 
     if (abortController) {
       abortController.signal.removeEventListener('abort', abortListener);
     }
 
-    return {
-      worker: strategy.name,
-      html,
-      score,
-      success: true,
-      jsEnabled: strategy.jsEnabled,
-      textLength: html.replace(/<[^>]*>/g, '').length,
-      ...structuralMetrics,
-      ...dominanceMetrics,
-    };
+    return snapshots;
   } catch (error) {
-    return {
-      worker: strategy.name,
-      html: '',
-      score: 0,
-      success: false,
-      error: error.message,
-    };
+    return [
+      {
+        worker: strategy.name,
+        html: '',
+        score: 0,
+        success: false,
+        error: error.message,
+      },
+    ];
   } finally {
     if (page && !page.isClosed()) {
       await page.close().catch(() => {});
@@ -282,7 +271,7 @@ export async function captureBatch(url, timingVariance = 0, abortController = nu
 
   const strategies = WORKER_STRATEGIES.map((s) => ({
     ...s,
-    delayMs: s.delayMs > 0 ? Math.max(0, s.delayMs + timingVariance) : s.delayMs,
+    snapshots: s.snapshots.map((delay) => Math.max(0, delay + timingVariance)),
   }));
 
   try {
@@ -292,11 +281,16 @@ export async function captureBatch(url, timingVariance = 0, abortController = nu
 
     const results = await Promise.allSettled(promises);
 
-    return results
-      .filter((r) => r.status === 'fulfilled' && r.value.success && !r.value.aborted)
-      .map((r) => r.value);
+    const allSnapshots = [];
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        allSnapshots.push(...result.value.filter((s) => s.success));
+      }
+    });
+
+    return allSnapshots;
   } catch (error) {
-    console.error(`[BATCH ERROR] ${error.message} - capture.js:300`);
+    console.error(`[BATCH ERROR] ${error.message}`);
     return [];
   }
 }
@@ -308,7 +302,7 @@ export async function captureMultiBatch(url, batchCount = 4, dynamicThreshold = 
   const batchPromises = [];
 
   for (let i = 0; i < batchCount; i++) {
-    const variance = Math.floor(Math.random() * 250) - 125;
+    const variance = Math.floor(Math.random() * 150) - 75;
 
     const batchPromise = (async () => {
       if (abortController.signal.aborted) {
@@ -321,7 +315,7 @@ export async function captureMultiBatch(url, batchCount = 4, dynamicThreshold = 
         const maxScore = Math.max(...batchResults.map((r) => r.score));
         if (maxScore >= dynamicThreshold) {
           abortController.abort();
-          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${dynamicThreshold} - capture.js:325`);
+          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${dynamicThreshold}`);
         }
       }
 
@@ -480,6 +474,7 @@ export function scoreHtml(html) {
     'exclusive to members',
     'read the full story',
     'continue reading',
+    'upgrade to continue',
   ];
 
   strongPenaltyKeywords.forEach((keyword) => {
