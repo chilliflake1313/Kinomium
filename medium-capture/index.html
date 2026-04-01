@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Playwright Capture</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #f3f4f6;
+      color: #111827;
+    }
+
+    .wrap {
+      max-width: 960px;
+      margin: 20px auto;
+      padding: 0 12px;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    input {
+      flex: 1;
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border: 1px solid #111827;
+      background: #111827;
+      color: #ffffff;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    #status {
+      min-height: 18px;
+      font-size: 13px;
+      color: #374151;
+      margin-bottom: 8px;
+    }
+
+    iframe {
+      width: 100%;
+      height: calc(100vh - 140px);
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row">
+      <input id="url" type="url" placeholder="https://medium.com/...">
+      <button id="loadBtn" type="button">Load</button>
+    </div>
+    <div id="status"></div>
+    <iframe id="viewer" sandbox="allow-same-origin"></iframe>
+  </div>
+
+  <script>
+    const input = document.getElementById('url');
+    const button = document.getElementById('loadBtn');
+    const status = document.getElementById('status');
+    const viewer = document.getElementById('viewer');
+
+    async function loadCapture() {
+      const url = input.value.trim();
+      if (!url) {
+        status.textContent = 'Enter a URL.';
+        return;
+      }
+
+      status.textContent = 'Capturing...';
+      button.disabled = true;
+
+      try {
+        const response = await fetch(`/capture?url=${encodeURIComponent(url)}&_=${Date.now()}`);
+        const html = await response.text();
+        if (!response.ok) {
+          status.textContent = html || `Error: ${response.status}`;
+          viewer.srcdoc = '';
+          return;
+        }
+        viewer.srcdoc = html;
+        status.textContent = 'Loaded.';
+      } catch (error) {
+        status.textContent = error.message || 'Request failed.';
+        viewer.srcdoc = '';
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    button.addEventListener('click', loadCapture);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        loadCapture();
+      }
+    });
+  </script>
+</body>
+</html>

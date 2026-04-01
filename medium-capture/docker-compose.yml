@@ -9,5 +9,7 @@ services:
     environment:
       - PUBLIC_INDEX=True
       - PUBLIC_SNAPSHOTS=True
-      - SEARCH_BACKEND_ENGINE=sonic
+      - SAVE_SINGLEFILE=True
+      - SAVE_DOM=True
+      - SAVE_SCREENSHOT=True
     command: server --quick-init 0.0.0.0:8000

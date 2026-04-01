@@ -1,18 +1,21 @@
 {
   "name": "medium-capture",
   "version": "1.0.0",
-  "description": "",
+  "description": "Parallel Playwright multi-timing capture engine",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "dev": "node server.js",
+    "install:browsers": "playwright install chromium",
     "test": "echo \"No tests configured\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
     "express": "^5.2.1",
-    "node-fetch": "^2.6.12"
+    "node-html-parser": "^7.0.1",
+    "playwright": "^1.53.1"
   }
 }
