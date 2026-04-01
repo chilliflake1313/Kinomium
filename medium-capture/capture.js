@@ -38,7 +38,6 @@ export async function getBrowserInstance() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--single-process',
       ],
     });
   }
@@ -167,7 +166,7 @@ export async function captureSingle(url, strategy, browser = null, abortControll
   }
 
   try {
-    context = await browser.newIncognitoBrowserContext();
+    context = await browser.newContext();
     memoryUsage.contexts++;
 
     page = await context.newPage();
@@ -180,7 +179,7 @@ export async function captureSingle(url, strategy, browser = null, abortControll
     });
 
     if (!strategy.jsEnabled) {
-      await page.setJavaScriptEnabled(false);
+      await context.setJavaScriptEnabled(false);
     }
 
     await page.setDefaultTimeout(strategy.timeout);
@@ -297,7 +296,7 @@ export async function captureBatch(url, timingVariance = 0, abortController = nu
       .filter((r) => r.status === 'fulfilled' && r.value.success && !r.value.aborted)
       .map((r) => r.value);
   } catch (error) {
-    console.error(`[BATCH ERROR] ${error.message}`);
+    console.error(`[BATCH ERROR] ${error.message} - capture.js:300`);
     return [];
   }
 }
@@ -322,7 +321,7 @@ export async function captureMultiBatch(url, batchCount = 4, dynamicThreshold = 
         const maxScore = Math.max(...batchResults.map((r) => r.score));
         if (maxScore >= dynamicThreshold) {
           abortController.abort();
-          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${dynamicThreshold}`);
+          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${dynamicThreshold} - capture.js:325`);
         }
       }
 

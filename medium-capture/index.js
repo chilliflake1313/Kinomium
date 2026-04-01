@@ -53,9 +53,7 @@ function normalizeUrl(url) {
 }
 
 app.get('/', (req, res) => {
-  res.status(200).type('text/plain').send(
-    'Medium Capture API is running. Use /capture?url=https://example.com and /health.'
-  );
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 app.get('/capture', async (req, res) => {

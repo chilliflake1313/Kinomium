@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Capture Archive</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            padding: 20px;
+            background: #f5f5f5;
+            border-bottom: 1px solid #ddd;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            padding: 10px 24px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            font-size: 13px;
+            color: #666;
+            min-height: 18px;
+        }
+        .content {
+            flex: 1;
+            position: relative;
+        }
+        iframe {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="controls">
+            <input type="text" id="url" placeholder="https://example.com">
+            <button id="capture">Capture</button>
+        </div>
+        <div class="status" id="status"></div>
+    </div>
+    <div class="content">
+        <iframe id="result"></iframe>
+    </div>
+
+    <script>
+        const urlInput = document.getElementById('url');
+        const captureBtn = document.getElementById('capture');
+        const status = document.getElementById('status');
+        const result = document.getElementById('result');
+
+        let blobUrl = null;
+
+        captureBtn.onclick = async () => {
+            const url = urlInput.value.trim();
+            if (!url) return;
+
+            captureBtn.disabled = true;
+            status.textContent = 'Loading...';
+            
+            if (blobUrl) URL.revokeObjectURL(blobUrl);
+            result.src = '';
+
+            try {
+                const res = await fetch(`/capture?url=${encodeURIComponent(url)}`);
+                if (!res.ok) throw new Error('Failed');
+
+                const html = await res.text();
+                const blob = new Blob([html], { type: 'text/html' });
+                blobUrl = URL.createObjectURL(blob);
+                result.src = blobUrl;
+
+                status.textContent = 'Done';
+            } catch (err) {
+                status.textContent = 'Error: ' + err.message;
+            } finally {
+                captureBtn.disabled = false;
+            }
+        };
+
+        urlInput.onkeypress = (e) => {
+            if (e.key === 'Enter') captureBtn.click();
+        };
+    </script>
+</body>
+</html>
