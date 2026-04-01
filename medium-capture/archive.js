@@ -28,7 +28,7 @@ export async function loadBestHtml(archivePath) {
   }
 }
 
-export async function saveBestHtml(archivePath, html, score) {
+export async function saveBestHtml(archivePath, html, score, worker, metrics = {}) {
   await fs.mkdir(archivePath, { recursive: true });
 
   const bestPath = path.join(archivePath, 'best.html');
@@ -36,8 +36,11 @@ export async function saveBestHtml(archivePath, html, score) {
 
   const meta = {
     score,
+    worker,
     savedAt: new Date().toISOString(),
     htmlLength: html.length,
+    textLength: html.replace(/<[^>]*>/g, '').length,
+    ...metrics,
   };
 
   await Promise.all([
@@ -46,7 +49,7 @@ export async function saveBestHtml(archivePath, html, score) {
   ]);
 }
 
-export async function saveAttempt(archivePath, html, score, worker) {
+export async function saveAttempt(archivePath, html, score, worker, metrics = {}) {
   const attemptsDir = path.join(archivePath, 'attempts');
   await fs.mkdir(attemptsDir, { recursive: true });
 
@@ -55,11 +58,13 @@ export async function saveAttempt(archivePath, html, score, worker) {
   const metaPath = path.join(attemptsDir, `attempt-${timestamp}.json`);
 
   const meta = {
-    score: score.toFixed(2),
+    score: parseFloat(score.toFixed(2)),
     worker,
     timestamp,
     htmlLength: html.length,
+    textLength: html.replace(/<[^>]*>/g, '').length,
     savedAt: new Date().toISOString(),
+    ...metrics,
   };
 
   await Promise.all([
@@ -81,4 +86,31 @@ export async function getAttemptsCount(archivePath) {
 export async function getBestScore(archivePath) {
   const cached = await loadBestHtml(archivePath);
   return cached?.meta?.score || 0;
+}
+
+export async function getHistoricalBest(archivePath) {
+  const attemptsDir = path.join(archivePath, 'attempts');
+
+  try {
+    const files = await fs.readdir(attemptsDir);
+    const metaFiles = files.filter((f) => f.startsWith('attempt-') && f.endsWith('.json'));
+
+    const allAttempts = await Promise.all(
+      metaFiles.map(async (file) => {
+        const content = await fs.readFile(path.join(attemptsDir, file), 'utf-8');
+        return JSON.parse(content);
+      })
+    );
+
+    allAttempts.sort((a, b) => b.score - a.score);
+
+    return {
+      count: allAttempts.length,
+      bestScore: allAttempts[0]?.score || 0,
+      averageScore: allAttempts.reduce((sum, a) => sum + a.score, 0) / allAttempts.length || 0,
+      workers: [...new Set(allAttempts.map((a) => a.worker))],
+    };
+  } catch {
+    return null;
+  }
 }

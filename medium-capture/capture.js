@@ -2,16 +2,28 @@ import { chromium } from 'playwright';
 
 const BROWSER_POOL = {
   instance: null,
-  contextCount: 0,
-  maxContexts: 5,
 };
 
+const USER_AGENTS = [
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+];
+
+const VIEWPORTS = [
+  { width: 1920, height: 1080 },
+  { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1536, height: 864 },
+];
+
 const WORKER_STRATEGIES = [
-  { name: 'Ultra-Early-50ms', waitUntil: 'domcontentloaded', delayMs: 50, earlyStop: true },
-  { name: 'Ultra-Early-150ms', waitUntil: 'domcontentloaded', delayMs: 150, earlyStop: true },
-  { name: 'DOMContentLoaded-Immediate', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true },
-  { name: 'DOMContentLoaded-300ms', waitUntil: 'domcontentloaded', delayMs: 300, earlyStop: false },
-  { name: 'NetworkIdle-800ms', waitUntil: 'networkidle', delayMs: 800, earlyStop: false },
+  { name: 'Pre-DOM-Commit', waitUntil: 'commit', delayMs: 0, earlyStop: true, blockAssets: true },
+  { name: 'Ultra-Early-50ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: true },
+  { name: 'Ultra-Early-150ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: false },
+  { name: 'DOMContentLoaded-300ms', waitUntil: 'domcontentloaded', delayMs: 300, earlyStop: false, blockAssets: false },
+  { name: 'NetworkIdle-800ms', waitUntil: 'networkidle', delayMs: 800, earlyStop: false, blockAssets: false },
 ];
 
 export async function getBrowserInstance() {
@@ -22,6 +34,7 @@ export async function getBrowserInstance() {
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
         '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
       ],
     });
   }
@@ -35,9 +48,19 @@ export async function closeBrowserPool() {
   }
 }
 
-function blockTracking(page) {
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function getRandomViewport() {
+  return VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+}
+
+function blockTracking(page, blockAssets = false) {
   return page.route('**/*', (route) => {
     const url = route.request().url();
+    const resourceType = route.request().resourceType();
+
     const shouldBlock =
       url.includes('analytics') ||
       url.includes('doubleclick') ||
@@ -49,11 +72,20 @@ function blockTracking(page) {
       url.includes('mixpanel') ||
       url.includes('amplitude') ||
       url.includes('hotjar') ||
-      url.includes('optimizely');
+      url.includes('optimizely') ||
+      url.includes('chartbeat') ||
+      url.includes('newrelic');
 
     if (shouldBlock) {
       return route.abort('blockedbyclient');
     }
+
+    if (blockAssets) {
+      if (resourceType === 'image' || resourceType === 'font' || resourceType === 'media') {
+        return route.abort('blockedbyclient');
+      }
+    }
+
     route.continue();
   });
 }
@@ -61,30 +93,37 @@ function blockTracking(page) {
 async function performEarlyCleanup(page) {
   await page.evaluate(() => {
     const overlaySelectors = [
-      '[role="dialog"]',
-      '.modal',
-      '.overlay',
+      '[role="dialog"][style*="position: fixed"]',
+      '[role="dialog"][style*="z-index"]',
+      '.modal[style*="z-index"]',
+      '.overlay[style*="position: fixed"]',
       '.paywall',
       '.cookie-banner',
       '.newsletter-popup',
-      '[class*="advertisement"]',
-      '[class*="modal"]',
-      '[class*="overlay"]',
       '[class*="paywall"]',
-      '[class*="cookie"]',
-      '[class*="newsletter"]',
-      '[class*="subscription"]',
-      '[class*="membership"]',
+      '[class*="cookie"][style*="position: fixed"]',
+      '[class*="newsletter"][style*="position: fixed"]',
+      '[class*="subscription"][style*="z-index"]',
+      '[class*="membership"][style*="z-index"]',
       'iframe[src*="doubleclick"]',
       'iframe[src*="facebook"]',
-      'iframe[src*="google"]',
-      'div[style*="position: fixed"]',
-      'div[style*="position: sticky"]',
+      'div[style*="position: fixed"][style*="z-index: 9"]',
+      'div[style*="position: fixed"][style*="inset: 0"]',
     ];
 
     overlaySelectors.forEach((selector) => {
       try {
-        document.querySelectorAll(selector).forEach((el) => el.remove());
+        document.querySelectorAll(selector).forEach((el) => {
+          const style = window.getComputedStyle(el);
+          const zIndex = parseInt(style.zIndex) || 0;
+          const position = style.position;
+
+          if (position === 'fixed' && zIndex > 999) {
+            el.remove();
+          } else if (selector.includes('paywall') || selector.includes('cookie') || selector.includes('newsletter')) {
+            el.remove();
+          }
+        });
       } catch {}
     });
 
@@ -94,51 +133,77 @@ async function performEarlyCleanup(page) {
   });
 }
 
-export async function captureSingle(url, strategy, browser = null, abortSignal = null) {
+export async function captureSingle(url, strategy, browser = null, earlyExitSignal = null) {
   let page;
   const ownBrowser = !browser;
+
+  if (earlyExitSignal && earlyExitSignal.shouldStop) {
+    return {
+      worker: strategy.name,
+      html: '',
+      score: 0,
+      success: false,
+      skipped: true,
+    };
+  }
 
   if (ownBrowser) {
     browser = await getBrowserInstance();
   }
 
   try {
-    const context = await browser.createIncognitoBrowserContext();
+    const context = await browser.newContext();
     page = await context.newPage();
-    await page.setDefaultTimeout(30000);
 
-    await blockTracking(page);
-
-    await page.goto(url, {
-      waitUntil: strategy.waitUntil,
-      timeout: 30000,
+    await page.setViewportSize(getRandomViewport());
+    await page.setExtraHTTPHeaders({
+      'User-Agent': getRandomUserAgent(),
+      'Accept-Language': 'en-US,en;q=0.9',
     });
 
-    if (strategy.earlyStop) {
+    await page.setDefaultTimeout(30000);
+    await blockTracking(page, strategy.blockAssets);
+
+    if (strategy.earlyStop && strategy.delayMs === 0) {
+      await page.goto(url, {
+        waitUntil: strategy.waitUntil,
+        timeout: 30000,
+      });
+
       await page.evaluate(() => window.stop());
+      await performEarlyCleanup(page);
+    } else {
+      await page.goto(url, {
+        waitUntil: strategy.waitUntil,
+        timeout: 30000,
+      });
+
+      if (strategy.earlyStop) {
+        await page.evaluate(() => window.stop());
+      }
+
+      await performEarlyCleanup(page);
+
+      if (strategy.delayMs > 0) {
+        await page.waitForTimeout(strategy.delayMs);
+      }
     }
 
-    await performEarlyCleanup(page);
-
-    if (strategy.delayMs > 0) {
-      await page.waitForTimeout(strategy.delayMs);
-    }
-
-    const html = await page.content();
-
-    const cleanedHtml = await page.evaluate((rawHtml) => {
+    const html = await page.evaluate(() => {
       document.querySelectorAll('script, noscript').forEach((el) => el.remove());
       return document.documentElement.outerHTML;
-    }, html);
+    });
 
-    const score = scoreHtml(cleanedHtml);
+    const score = scoreHtml(html);
+    const structuralMetrics = analyzeStructure(html);
 
     return {
       worker: strategy.name,
-      html: cleanedHtml,
+      html,
       score,
       success: true,
-      textLength: cleanedHtml.replace(/<[^>]*>/g, '').length,
+      textLength: html.replace(/<[^>]*>/g, '').length,
+      ...structuralMetrics,
     };
   } catch (error) {
     return {
@@ -152,12 +217,10 @@ export async function captureSingle(url, strategy, browser = null, abortSignal =
     if (page) {
       await page.close().catch(() => {});
     }
-    if (ownBrowser) {
-    }
   }
 }
 
-export async function captureBatch(url, timingVariance = 0) {
+export async function captureBatch(url, timingVariance = 0, earlyExitSignal = null) {
   const browser = await getBrowserInstance();
 
   const strategies = WORKER_STRATEGIES.map((s) => ({
@@ -167,7 +230,7 @@ export async function captureBatch(url, timingVariance = 0) {
 
   try {
     const promises = strategies.map((strategy) =>
-      captureSingle(url, strategy, browser)
+      captureSingle(url, strategy, browser, earlyExitSignal)
     );
 
     const results = await Promise.allSettled(promises);
@@ -181,15 +244,30 @@ export async function captureBatch(url, timingVariance = 0) {
   }
 }
 
-export async function captureMultiBatch(url, batchCount = 4) {
+export async function captureMultiBatch(url, batchCount = 4, scoreThreshold = 120) {
   const allResults = [];
+  const earlyExitSignal = { shouldStop: false };
+
   const batchPromises = [];
 
   for (let i = 0; i < batchCount; i++) {
-    const variance = Math.floor(Math.random() * 200) - 100;
+    const variance = Math.floor(Math.random() * 250) - 125;
 
     const batchPromise = (async () => {
-      const batchResults = await captureBatch(url, variance);
+      if (earlyExitSignal.shouldStop) {
+        return [];
+      }
+
+      const batchResults = await captureBatch(url, variance, earlyExitSignal);
+
+      if (batchResults.length > 0) {
+        const maxScore = Math.max(...batchResults.map((r) => r.score));
+        if (maxScore >= scoreThreshold) {
+          earlyExitSignal.shouldStop = true;
+          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${scoreThreshold}`);
+        }
+      }
+
       return batchResults;
     })();
 
@@ -207,74 +285,123 @@ export async function captureMultiBatch(url, batchCount = 4) {
   return allResults;
 }
 
+function analyzeStructure(html) {
+  const textContent = html.replace(/<[^>]*>/g, '');
+  const htmlLength = html.length;
+  const textLength = textContent.length;
+
+  const textToHtmlRatio = htmlLength > 0 ? textLength / htmlLength : 0;
+
+  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  const hasArticleTag = !!articleMatch;
+  const articleContentLength = articleMatch ? articleMatch[1].replace(/<[^>]*>/g, '').length : 0;
+
+  const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  const hasMainTag = !!mainMatch;
+
+  return {
+    textToHtmlRatio,
+    hasArticleTag,
+    articleContentLength,
+    hasMainTag,
+  };
+}
+
 export function scoreHtml(html) {
-  let score = 100;
+  let score = 0;
 
   const textContent = html.replace(/<[^>]*>/g, '').trim();
   const textLength = textContent.length;
   const lowerText = html.toLowerCase();
+  const htmlLength = html.length;
 
   if (textLength < 500) {
-    score -= 40;
-  } else if (textLength < 2000) {
-    score += Math.min(textLength / 500, 20);
-  } else {
-    score += Math.min(textLength / 5000, 40);
+    return 0;
   }
+
+  score += Math.min(textLength / 3000, 50);
 
   const pCount = (html.match(/<p[^>]*>/gi) || []).length;
   if (pCount < 3) {
-    score -= 15;
+    score -= 20;
   } else {
-    score += Math.min(pCount * 2, 25);
+    score += Math.min(pCount * 2.5, 30);
+  }
+
+  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  if (articleMatch) {
+    const articleText = articleMatch[1].replace(/<[^>]*>/g, '').trim();
+    const articleLength = articleText.length;
+
+    if (articleLength > 1000) {
+      score += 25;
+    } else if (articleLength > 500) {
+      score += 15;
+    }
   }
 
   const semanticCount = (html.match(/<(article|section|main|header|footer|nav)[^>]*>/gi) || []).length;
-  score += Math.min(semanticCount * 3, 15);
+  score += Math.min(semanticCount * 3, 20);
 
   const headingCount = (html.match(/<h[1-6][^>]*>/gi) || []).length;
-  score += Math.min(headingCount, 10);
+  score += Math.min(headingCount * 1.5, 15);
+
+  const textToHtmlRatio = htmlLength > 0 ? textLength / htmlLength : 0;
+  if (textToHtmlRatio > 0.15) {
+    score += 20;
+  } else if (textToHtmlRatio > 0.10) {
+    score += 10;
+  }
 
   const strongPenaltyKeywords = [
     'join medium',
     'get unlimited access',
     'already a member',
     'subscribe now',
-    'sign in',
-    'log in',
+    'sign in to read',
+    'log in to continue',
     'member only',
     'member exclusive',
     'subscribe to read',
     'paywall',
     'premium content',
-    'exclusive content',
+    'exclusive to members',
+    'read the full story',
   ];
 
   strongPenaltyKeywords.forEach((keyword) => {
     if (lowerText.includes(keyword)) {
-      score -= 50;
+      score -= 60;
     }
   });
 
-  const mediumPenaltyKeywords = ['sign up', 'subscribe', 'membership', 'upgrade'];
+  const mediumPenaltyKeywords = [
+    'sign up',
+    'subscribe',
+    'membership',
+    'upgrade',
+    'become a member',
+    'get access',
+  ];
+
   mediumPenaltyKeywords.forEach((keyword) => {
     if (lowerText.includes(keyword)) {
-      score -= 20;
+      score -= 25;
     }
   });
 
   const divCount = (html.match(/<div[^>]*>/gi) || []).length;
-  if (divCount > 500) {
-    score -= 10;
-  }
-
-  if (html.includes('<script')) {
+  if (divCount > 600) {
     score -= 15;
   }
 
+  if (html.includes('<script')) {
+    score -= 20;
+  }
+
   const inlineStyleCount = (html.match(/style="/gi) || []).length;
-  if (inlineStyleCount > 150) {
-    score -= 5;
+  if (inlineStyleCount > 200) {
+    score -= 10;
   }
 
   return Math.max(score, 0);

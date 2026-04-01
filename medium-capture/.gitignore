@@ -1,0 +1,7 @@
+node_modules/
+archive/
+.DS_Store
+*.log
+.env
+.vscode/
+*.swp
