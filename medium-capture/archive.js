@@ -73,19 +73,25 @@ export async function saveAttempt(archivePath, html, score, worker, metrics = {}
   ]);
 }
 
-export async function getAttemptsCount(archivePath) {
+export async function getHistoricalScores(archivePath) {
   const attemptsDir = path.join(archivePath, 'attempts');
+
   try {
     const files = await fs.readdir(attemptsDir);
-    return files.filter((f) => f.startsWith('attempt-') && f.endsWith('.html')).length;
-  } catch {
-    return 0;
-  }
-}
+    const metaFiles = files.filter((f) => f.startsWith('attempt-') && f.endsWith('.json'));
 
-export async function getBestScore(archivePath) {
-  const cached = await loadBestHtml(archivePath);
-  return cached?.meta?.score || 0;
+    const scores = await Promise.all(
+      metaFiles.map(async (file) => {
+        const content = await fs.readFile(path.join(attemptsDir, file), 'utf-8');
+        const meta = JSON.parse(content);
+        return meta.score;
+      })
+    );
+
+    return scores;
+  } catch {
+    return [];
+  }
 }
 
 export async function getHistoricalBest(archivePath) {

@@ -19,12 +19,14 @@ const VIEWPORTS = [
 ];
 
 const WORKER_STRATEGIES = [
-  { name: 'Pre-DOM-Commit', waitUntil: 'commit', delayMs: 0, earlyStop: true, blockAssets: true },
-  { name: 'Ultra-Early-50ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: true },
-  { name: 'Ultra-Early-150ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: false },
-  { name: 'DOMContentLoaded-300ms', waitUntil: 'domcontentloaded', delayMs: 300, earlyStop: false, blockAssets: false },
-  { name: 'NetworkIdle-800ms', waitUntil: 'networkidle', delayMs: 800, earlyStop: false, blockAssets: false },
+  { name: 'Pre-DOM-Commit', waitUntil: 'commit', delayMs: 0, earlyStop: true, blockAssets: true, timeout: 8000, jsEnabled: true },
+  { name: 'Ultra-Early-50ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: true, timeout: 10000, jsEnabled: true },
+  { name: 'Ultra-Early-150ms', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: true, blockAssets: false, timeout: 12000, jsEnabled: true },
+  { name: 'NoJS-Early', waitUntil: 'domcontentloaded', delayMs: 0, earlyStop: false, blockAssets: false, timeout: 15000, jsEnabled: false },
+  { name: 'NetworkIdle-800ms', waitUntil: 'networkidle', delayMs: 800, earlyStop: false, blockAssets: false, timeout: 30000, jsEnabled: true },
 ];
+
+let memoryUsage = { contexts: 0, pages: 0 };
 
 export async function getBrowserInstance() {
   if (!BROWSER_POOL.instance) {
@@ -35,6 +37,8 @@ export async function getBrowserInstance() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
       ],
     });
   }
@@ -45,7 +49,12 @@ export async function closeBrowserPool() {
   if (BROWSER_POOL.instance) {
     await BROWSER_POOL.instance.close();
     BROWSER_POOL.instance = null;
+    memoryUsage = { contexts: 0, pages: 0 };
   }
+}
+
+export function getMemoryUsage() {
+  return { ...memoryUsage };
 }
 
 function getRandomUserAgent() {
@@ -66,6 +75,7 @@ function blockTracking(page, blockAssets = false) {
       url.includes('doubleclick') ||
       url.includes('google-analytics') ||
       url.includes('facebook.com/tr') ||
+      url.includes('facebook.com/plugins') ||
       url.includes('tracking') ||
       url.includes('gtag') ||
       url.includes('segment.io') ||
@@ -74,7 +84,9 @@ function blockTracking(page, blockAssets = false) {
       url.includes('hotjar') ||
       url.includes('optimizely') ||
       url.includes('chartbeat') ||
-      url.includes('newrelic');
+      url.includes('newrelic') ||
+      url.includes('quantserve') ||
+      url.includes('scorecardresearch');
 
     if (shouldBlock) {
       return route.abort('blockedbyclient');
@@ -107,8 +119,6 @@ async function performEarlyCleanup(page) {
       '[class*="membership"][style*="z-index"]',
       'iframe[src*="doubleclick"]',
       'iframe[src*="facebook"]',
-      'div[style*="position: fixed"][style*="z-index: 9"]',
-      'div[style*="position: fixed"][style*="inset: 0"]',
     ];
 
     overlaySelectors.forEach((selector) => {
@@ -118,9 +128,12 @@ async function performEarlyCleanup(page) {
           const zIndex = parseInt(style.zIndex) || 0;
           const position = style.position;
 
-          if (position === 'fixed' && zIndex > 999) {
-            el.remove();
-          } else if (selector.includes('paywall') || selector.includes('cookie') || selector.includes('newsletter')) {
+          if (
+            (position === 'fixed' && zIndex > 999) ||
+            selector.includes('paywall') ||
+            selector.includes('cookie') ||
+            selector.includes('newsletter')
+          ) {
             el.remove();
           }
         });
@@ -130,20 +143,22 @@ async function performEarlyCleanup(page) {
     document.querySelectorAll('script[src*="analytics"]').forEach((el) => el.remove());
     document.querySelectorAll('script[src*="doubleclick"]').forEach((el) => el.remove());
     document.querySelectorAll('script[src*="facebook"]').forEach((el) => el.remove());
+    document.querySelectorAll('script[src*="tracking"]').forEach((el) => el.remove());
   });
 }
 
-export async function captureSingle(url, strategy, browser = null, earlyExitSignal = null) {
+export async function captureSingle(url, strategy, browser = null, abortController = null) {
   let page;
+  let context;
   const ownBrowser = !browser;
 
-  if (earlyExitSignal && earlyExitSignal.shouldStop) {
+  if (abortController && abortController.signal.aborted) {
     return {
       worker: strategy.name,
       html: '',
       score: 0,
       success: false,
-      skipped: true,
+      aborted: true,
     };
   }
 
@@ -152,8 +167,11 @@ export async function captureSingle(url, strategy, browser = null, earlyExitSign
   }
 
   try {
-    const context = await browser.newContext();
+    context = await browser.newIncognitoBrowserContext();
+    memoryUsage.contexts++;
+
     page = await context.newPage();
+    memoryUsage.pages++;
 
     await page.setViewportSize(getRandomViewport());
     await page.setExtraHTTPHeaders({
@@ -161,24 +179,42 @@ export async function captureSingle(url, strategy, browser = null, earlyExitSign
       'Accept-Language': 'en-US,en;q=0.9',
     });
 
-    await page.setDefaultTimeout(30000);
+    if (!strategy.jsEnabled) {
+      await page.setJavaScriptEnabled(false);
+    }
+
+    await page.setDefaultTimeout(strategy.timeout);
+
+    const abortListener = () => {
+      if (page && !page.isClosed()) {
+        page.close().catch(() => {});
+      }
+    };
+
+    if (abortController) {
+      abortController.signal.addEventListener('abort', abortListener);
+    }
+
     await blockTracking(page, strategy.blockAssets);
 
     if (strategy.earlyStop && strategy.delayMs === 0) {
       await page.goto(url, {
         waitUntil: strategy.waitUntil,
-        timeout: 30000,
+        timeout: strategy.timeout,
       });
 
-      await page.evaluate(() => window.stop());
+      if (strategy.jsEnabled) {
+        await page.evaluate(() => window.stop());
+      }
+
       await performEarlyCleanup(page);
     } else {
       await page.goto(url, {
         waitUntil: strategy.waitUntil,
-        timeout: 30000,
+        timeout: strategy.timeout,
       });
 
-      if (strategy.earlyStop) {
+      if (strategy.earlyStop && strategy.jsEnabled) {
         await page.evaluate(() => window.stop());
       }
 
@@ -189,6 +225,16 @@ export async function captureSingle(url, strategy, browser = null, earlyExitSign
       }
     }
 
+    if (abortController && abortController.signal.aborted) {
+      return {
+        worker: strategy.name,
+        html: '',
+        score: 0,
+        success: false,
+        aborted: true,
+      };
+    }
+
     const html = await page.evaluate(() => {
       document.querySelectorAll('script, noscript').forEach((el) => el.remove());
       return document.documentElement.outerHTML;
@@ -196,14 +242,21 @@ export async function captureSingle(url, strategy, browser = null, earlyExitSign
 
     const score = scoreHtml(html);
     const structuralMetrics = analyzeStructure(html);
+    const dominanceMetrics = analyzeContentDominance(html);
+
+    if (abortController) {
+      abortController.signal.removeEventListener('abort', abortListener);
+    }
 
     return {
       worker: strategy.name,
       html,
       score,
       success: true,
+      jsEnabled: strategy.jsEnabled,
       textLength: html.replace(/<[^>]*>/g, '').length,
       ...structuralMetrics,
+      ...dominanceMetrics,
     };
   } catch (error) {
     return {
@@ -214,13 +267,18 @@ export async function captureSingle(url, strategy, browser = null, earlyExitSign
       error: error.message,
     };
   } finally {
-    if (page) {
+    if (page && !page.isClosed()) {
       await page.close().catch(() => {});
+      memoryUsage.pages--;
+    }
+    if (context) {
+      await context.close().catch(() => {});
+      memoryUsage.contexts--;
     }
   }
 }
 
-export async function captureBatch(url, timingVariance = 0, earlyExitSignal = null) {
+export async function captureBatch(url, timingVariance = 0, abortController = null) {
   const browser = await getBrowserInstance();
 
   const strategies = WORKER_STRATEGIES.map((s) => ({
@@ -230,13 +288,13 @@ export async function captureBatch(url, timingVariance = 0, earlyExitSignal = nu
 
   try {
     const promises = strategies.map((strategy) =>
-      captureSingle(url, strategy, browser, earlyExitSignal)
+      captureSingle(url, strategy, browser, abortController)
     );
 
     const results = await Promise.allSettled(promises);
 
     return results
-      .filter((r) => r.status === 'fulfilled' && r.value.success)
+      .filter((r) => r.status === 'fulfilled' && r.value.success && !r.value.aborted)
       .map((r) => r.value);
   } catch (error) {
     console.error(`[BATCH ERROR] ${error.message}`);
@@ -244,9 +302,9 @@ export async function captureBatch(url, timingVariance = 0, earlyExitSignal = nu
   }
 }
 
-export async function captureMultiBatch(url, batchCount = 4, scoreThreshold = 120) {
+export async function captureMultiBatch(url, batchCount = 4, dynamicThreshold = null) {
   const allResults = [];
-  const earlyExitSignal = { shouldStop: false };
+  const abortController = new AbortController();
 
   const batchPromises = [];
 
@@ -254,17 +312,17 @@ export async function captureMultiBatch(url, batchCount = 4, scoreThreshold = 12
     const variance = Math.floor(Math.random() * 250) - 125;
 
     const batchPromise = (async () => {
-      if (earlyExitSignal.shouldStop) {
+      if (abortController.signal.aborted) {
         return [];
       }
 
-      const batchResults = await captureBatch(url, variance, earlyExitSignal);
+      const batchResults = await captureBatch(url, variance, abortController);
 
-      if (batchResults.length > 0) {
+      if (batchResults.length > 0 && dynamicThreshold) {
         const maxScore = Math.max(...batchResults.map((r) => r.score));
-        if (maxScore >= scoreThreshold) {
-          earlyExitSignal.shouldStop = true;
-          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${scoreThreshold}`);
+        if (maxScore >= dynamicThreshold) {
+          abortController.abort();
+          console.log(`[EARLY EXIT] Score ${maxScore.toFixed(2)} >= ${dynamicThreshold}`);
         }
       }
 
@@ -298,12 +356,44 @@ function analyzeStructure(html) {
 
   const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
   const hasMainTag = !!mainMatch;
+  const mainContentLength = mainMatch ? mainMatch[1].replace(/<[^>]*>/g, '').length : 0;
 
   return {
     textToHtmlRatio,
     hasArticleTag,
     articleContentLength,
     hasMainTag,
+    mainContentLength,
+  };
+}
+
+function analyzeContentDominance(html) {
+  const totalText = html.replace(/<[^>]*>/g, '').length;
+
+  const navMatch = html.match(/<nav[^>]*>([\s\S]*?)<\/nav>/gi);
+  const navText = navMatch
+    ? navMatch.map((n) => n.replace(/<[^>]*>/g, '')).join('').length
+    : 0;
+
+  const headerMatch = html.match(/<header[^>]*>([\s\S]*?)<\/header>/gi);
+  const headerText = headerMatch
+    ? headerMatch.map((h) => h.replace(/<[^>]*>/g, '')).join('').length
+    : 0;
+
+  const footerMatch = html.match(/<footer[^>]*>([\s\S]*?)<\/footer>/gi);
+  const footerText = footerMatch
+    ? footerMatch.map((f) => f.replace(/<[^>]*>/g, '')).join('').length
+    : 0;
+
+  const noiseText = navText + headerText + footerText;
+  const contentText = totalText - noiseText;
+
+  const contentDominanceRatio = totalText > 0 ? contentText / totalText : 0;
+
+  return {
+    contentDominanceRatio,
+    noiseText,
+    contentText,
   };
 }
 
@@ -319,13 +409,13 @@ export function scoreHtml(html) {
     return 0;
   }
 
-  score += Math.min(textLength / 3000, 50);
+  score += Math.min(textLength / 2500, 50);
 
   const pCount = (html.match(/<p[^>]*>/gi) || []).length;
   if (pCount < 3) {
-    score -= 20;
+    score -= 25;
   } else {
-    score += Math.min(pCount * 2.5, 30);
+    score += Math.min(pCount * 2.5, 35);
   }
 
   const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
@@ -333,23 +423,46 @@ export function scoreHtml(html) {
     const articleText = articleMatch[1].replace(/<[^>]*>/g, '').trim();
     const articleLength = articleText.length;
 
-    if (articleLength > 1000) {
-      score += 25;
+    if (articleLength > 2000) {
+      score += 30;
+    } else if (articleLength > 1000) {
+      score += 20;
     } else if (articleLength > 500) {
+      score += 10;
+    }
+  }
+
+  const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  if (mainMatch) {
+    const mainText = mainMatch[1].replace(/<[^>]*>/g, '').trim();
+    if (mainText.length > 1000) {
       score += 15;
     }
   }
 
   const semanticCount = (html.match(/<(article|section|main|header|footer|nav)[^>]*>/gi) || []).length;
-  score += Math.min(semanticCount * 3, 20);
+  score += Math.min(semanticCount * 2.5, 20);
 
   const headingCount = (html.match(/<h[1-6][^>]*>/gi) || []).length;
   score += Math.min(headingCount * 1.5, 15);
 
   const textToHtmlRatio = htmlLength > 0 ? textLength / htmlLength : 0;
-  if (textToHtmlRatio > 0.15) {
+  if (textToHtmlRatio > 0.18) {
+    score += 25;
+  } else if (textToHtmlRatio > 0.12) {
+    score += 15;
+  } else if (textToHtmlRatio > 0.08) {
+    score += 5;
+  }
+
+  const navText = (html.match(/<nav[^>]*>([\s\S]*?)<\/nav>/gi) || [])
+    .map((n) => n.replace(/<[^>]*>/g, ''))
+    .join('').length;
+
+  const contentDominance = textLength > 0 ? (textLength - navText) / textLength : 0;
+  if (contentDominance > 0.85) {
     score += 20;
-  } else if (textToHtmlRatio > 0.10) {
+  } else if (contentDominance > 0.70) {
     score += 10;
   }
 
@@ -367,11 +480,12 @@ export function scoreHtml(html) {
     'premium content',
     'exclusive to members',
     'read the full story',
+    'continue reading',
   ];
 
   strongPenaltyKeywords.forEach((keyword) => {
     if (lowerText.includes(keyword)) {
-      score -= 60;
+      score -= 70;
     }
   });
 
@@ -386,7 +500,7 @@ export function scoreHtml(html) {
 
   mediumPenaltyKeywords.forEach((keyword) => {
     if (lowerText.includes(keyword)) {
-      score -= 25;
+      score -= 30;
     }
   });
 
@@ -396,7 +510,7 @@ export function scoreHtml(html) {
   }
 
   if (html.includes('<script')) {
-    score -= 20;
+    score -= 25;
   }
 
   const inlineStyleCount = (html.match(/style="/gi) || []).length;
@@ -412,4 +526,15 @@ export function validateContent(html, minTextLength = 500, minParagraphs = 2) {
   const pCount = (html.match(/<p[^>]*>/gi) || []).length;
 
   return textLength >= minTextLength && pCount >= minParagraphs;
+}
+
+export function calculateDynamicThreshold(historicalScores = []) {
+  if (historicalScores.length === 0) {
+    return 130;
+  }
+
+  const avg = historicalScores.reduce((sum, s) => sum + s, 0) / historicalScores.length;
+  const max = Math.max(...historicalScores);
+
+  return Math.min(max * 0.95, avg * 1.3, 150);
 }
