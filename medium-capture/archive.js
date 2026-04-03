@@ -94,6 +94,7 @@ export async function getHistoricalScores(archivePath) {
   }
 }
 
+
 export async function getHistoricalBest(archivePath) {
   const attemptsDir = path.join(archivePath, 'attempts');
 
