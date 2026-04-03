@@ -211,6 +211,7 @@ process.on('SIGTERM', async () => {
   });
 });
 
+
 process.on('SIGINT', async () => {
   console.log('[SHUTDOWN] Closing browser pool...');
   await closeBrowserPool();
