@@ -65,6 +65,7 @@ function getRandomViewport() {
 }
 
 
+
 async function blockNonEssential(page, blockAssets = false) {
   await page.route('**/*', (route) => {
     const url = route.request().url();
