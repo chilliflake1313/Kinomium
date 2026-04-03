@@ -178,6 +178,7 @@ app.get('/stats/:hash', async (req, res) => {
       return res.status(404).json({ error: 'No archive found' });
     }
 
+    
     const historical = await getHistoricalBest(archivePath);
 
     res.json({
